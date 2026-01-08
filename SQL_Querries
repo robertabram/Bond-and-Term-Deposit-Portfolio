@@ -1,0 +1,118 @@
+<--Time Deposits Portfolio (Last 12 months)-->
+DECLARE @START_DATE date = datefromparts(year(cast(getdate()-1 as date))-1, month(cast(getdate()-1 as date)), 31)
+		, @END_DATE date = eomonth(dateadd(month,-1,getdate()-1)), @DATE date = cast(getdate()-1 as date)
+DROP TABLE IF EXISTS #DEP
+
+
+SELECT 'Time Deposits' as ACCOUNTS
+		, d.CODE AGR_CODE
+		, PRESENT_VALUE 
+		, case when TEMPLATE_TYPE in ('170L','171L','170K','171K') then 'Kid Deposit'
+				when SUBSTRING(TEMPLATE_TYPE,1,2) = '17' OR SUBSTRING(TEMPLATE_TYPE,1,3) = '190' OR SUBSTRING(TEMPLATE_TYPE,1,3) = '191'
+						OR SUBSTRING(TEMPLATE_TYPE,1,3) = '192' OR SUBSTRING(TEMPLATE_TYPE,1,3) = '193' then 'Ameria Deposit' 
+				when SUBSTRING(TEMPLATE_TYPE,1,2) = '18' OR SUBSTRING(TEMPLATE_TYPE,1,3) = '194' OR SUBSTRING(TEMPLATE_TYPE,1,3) = '195' then 'Ameria Cumulative Deposit'
+						else 'Old Deposit' end as DEPOSIT_TYPE
+		, FACT_DATE
+		, EOMONTH(FACT_DATE) MAX_DATE
+		INTO #DEP
+FROM [dbo].[DEPOSIT_FACT] f
+join [RD].[dbo].[DEPOSIT_DIM_ByDATE](@DATE) d  on f.CODE = d.CODE
+join GENERAL.dbo.CLIENT_DIM_ByDATE(@DATE) c on d.CLIENT_CODE = c.CODE
+where f.FACT_DATE between @START_DATE and @END_DATE
+		and LEGAL_STATE = '21'
+
+
+
+select ACCOUNTS
+		, AGR_CODE
+		, PRESENT_VALUE
+		, DEPOSIT_TYPE
+		, FACT_DATE
+from #DEP
+where FACT_DATE = MAX_DATE 
+
+
+
+<--Portfolio Daily-->
+DECLARE @DATE date = CAST(GETDATE()-1 as date) , @MONTH_START date = DATEFROMPARTS(YEAR(CAST(GETDATE()-1 as date)), MONTH(CAST(GETDATE()-1 as date)), 1), @FACT_DATE date = CAST(GETDATE()-1 as date)
+
+SELECT 'Time Deposits' as ACCOUNTS
+		, CLIENT_CODE
+		, d.CODE AGR_CODE
+		, PRESENT_VALUE PRESENT_VALUE
+		, case when CURRENCY = '000' then 'AMD' 
+				when CURRENCY = '001' then 'USD'
+				when CURRENCY = '003' then 'GBP'
+				when CURRENCY = '046' then 'EUR'
+				when CURRENCY = '058' then 'RUB'
+					else 'Other' end as CURRENCY
+		, FACT_DATE
+		, case when d.CREATOR_USER_ID = '1596' then 'MyAmeria' 
+				else 'Branch' end as CHANNEL
+		, case when TEMPLATE_TYPE in ('170L','171L','170K','171K') then 'Kid Deposit'
+				when SUBSTRING(TEMPLATE_TYPE,1,2) = '17' OR SUBSTRING(TEMPLATE_TYPE,1,3) = '190' OR SUBSTRING(TEMPLATE_TYPE,1,3) = '191'
+						OR SUBSTRING(TEMPLATE_TYPE,1,3) = '192' OR SUBSTRING(TEMPLATE_TYPE,1,3) = '193' then 'Ameria Deposit' 
+				when SUBSTRING(TEMPLATE_TYPE,1,2) = '18' OR SUBSTRING(TEMPLATE_TYPE,1,3) = '194' OR SUBSTRING(TEMPLATE_TYPE,1,3) = '195' then 'Ameria Cumulative Deposit'
+						else 'Old Deposit' end as 'Deposit Type'
+		, case when left (c.ACCESS_TYPE,1) = '1' then 'Standard'
+				when left (c.ACCESS_TYPE,1) = '3' then 'Non-Account'
+				when left (c.ACCESS_TYPE,1) = '6' then 'Premium/Partner'
+				when left (c.ACCESS_TYPE,1) = '7' then 'Persona' end as CLIENT_TYPE
+ FROM [dbo].[DEPOSIT_FACT] f
+join [RD].[dbo].[DEPOSIT_DIM_ByDATE](@DATE) d  on f.CODE = d.CODE
+join GENERAL.dbo.CLIENTS c on d.CLIENT_CODE = c.CODE
+where f.FACT_DATE between @MONTH_START and @FACT_DATE 
+		and LEGAL_STATE = '21'
+
+
+<--Effect of Exchange Rate-->
+DROP TABLE IF EXISTS #PORTF, #EXC
+DECLARE @DATE date = CAST(GETDATE()-1 as date), @FACT_DATE date = CAST(GETDATE()-2 as date)
+
+
+select case when CURRENCY = '001' then 'USD' else 'EUR' end as CURRENCY, SUM(PRESENT_VALUE) PRESENT_VALUE
+INTO #PORTF
+from FUNDS_INVOLVED_IN_BONDS_DIM_ByDATE(@DATE) d
+join FUNDS_INVOLVED_IN_BONDS_FACT f on d.CODE = f.CODE
+join GENERAL.dbo.CLIENTS c on d.CLIENT_CODE = c.CODE
+where LEGAL_STATE = '21' 
+		and CURRENCY <> '000'
+		and FACT_DATE = @DATE
+group by CURRENCY
+order by SUM(PRESENT_VALUE) DESC
+
+
+
+select FACT_DATE
+		, ISO_CODE
+		,  VALUE
+		INTO #EXC
+from GENERAL.dbo.view_CB_EXCHANGE_RATES
+where CURR_CODE in (select distinct CURRENCY
+from FUNDS_INVOLVED_IN_BONDS_DIM_ByDATE(@DATE) d
+join FUNDS_INVOLVED_IN_BONDS_FACT f on d.CODE = f.CODE
+join GENERAL.dbo.CLIENTS c on d.CLIENT_CODE = c.CODE
+where LEGAL_STATE = '21' 
+		and CURRENCY <> '000'
+		and FACT_DATE = @FACT_DATE) and 
+		FACT_DATE between @FACT_DATE and @DATE
+
+
+select CURRENCY
+		, VALUE
+		, FACT_DATE
+		, PRESENT_VALUE
+		, PREV_PRESENT_VALUE_EXCHANGED 
+		, PRESENT_VALUE_EXCHANGED
+		, PRESENT_VALUE_EXC_DIFF * VALUE DIFFERENCE_OF_EXCH_RATE
+from (
+select *
+		, PRESENT_VALUE / VALUE PRESENT_VALUE_EXCHANGED
+		, LEAD(PRESENT_VALUE / VALUE) over(partition by ISO_CODE order by FACT_DATE) PREV_PRESENT_VALUE_EXCHANGED
+		, PRESENT_VALUE / VALUE - LEAD(PRESENT_VALUE / VALUE) over(partition by ISO_CODE order by FACT_DATE) PRESENT_VALUE_EXC_DIFF
+from #PORTF p
+join #EXC ex on p.CURRENCY = ex.ISO_CODE
+) t
+where PREV_PRESENT_VALUE_EXCHANGED IS NOT NULL
+
+DROP TABLE IF EXISTS #PORTF, #EXC
